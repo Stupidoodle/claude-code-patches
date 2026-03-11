@@ -9,9 +9,10 @@ const { execSync } = require('child_process');
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
 const isRestore = args.includes('--restore');
+const isVerify = args.includes('--verify');
 const showHelp = args.includes('--help') || args.includes('-h');
 
-const VERSION = '2.1.69';
+const VERSION = '2.1.72';
 
 if (showHelp) {
   console.log(`Claude Code Thinking Visibility Patcher v${VERSION}`);
@@ -21,16 +22,65 @@ if (showHelp) {
   console.log('Options:');
   console.log('  --dry-run    Preview changes without applying them');
   console.log('  --restore    Restore from backup file');
+  console.log('  --verify     Verify patch status without modifying the binary');
   console.log('  --help, -h   Show this help message\n');
   console.log('Examples:');
   console.log('  node patch-thinking.js              # Apply patch');
   console.log('  node patch-thinking.js --dry-run    # Preview changes');
+  console.log('  node patch-thinking.js --verify     # Check patch status');
   console.log('  node patch-thinking.js --restore    # Restore original');
   process.exit(0);
 }
 
 console.log(`Claude Code Thinking Visibility Patcher v${VERSION}`);
 console.log('==============================================\n');
+
+// --- Settings check: showThinkingSummaries ---
+// Claude Code sends a "redact-thinking" beta flag to the API by default, which
+// causes the API to return thinking blocks with empty text (only signatures).
+// Setting showThinkingSummaries: true in user settings prevents this beta from
+// being sent, allowing the API to return actual thinking content.
+const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+
+function checkAndConfigureSettings() {
+  let settings = {};
+  let settingsExisted = false;
+
+  try {
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      settingsExisted = true;
+    }
+  } catch (e) {
+    console.warn(`Warning: Could not read ${settingsPath}: ${e.message}`);
+  }
+
+  if (settings.showThinkingSummaries === true) {
+    console.log('Settings: showThinkingSummaries is already enabled');
+    return 'already_set';
+  }
+
+  console.log('Settings: showThinkingSummaries needs to be enabled');
+  console.log('  This prevents the API from redacting thinking content');
+
+  if (isDryRun || isVerify) {
+    return 'needs_update';
+  }
+
+  try {
+    settings.showThinkingSummaries = true;
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+    console.log(`  Updated ${settingsPath}`);
+    return 'updated';
+  } catch (e) {
+    console.error(`  Error: Could not update settings: ${e.message}`);
+    console.error(`  Manually add "showThinkingSummaries": true to ${settingsPath}`);
+    return 'error';
+  }
+}
+
+const settingsResult = checkAndConfigureSettings();
+console.log();
 
 // Auto-detect Claude Code native binary path
 function getClaudeCodePath() {
@@ -154,36 +204,78 @@ console.log('Reading binary...');
 const data = fs.readFileSync(targetPath);
 const dataStr = data.toString('utf8');
 
+// Verification helper: count occurrences of a pattern in a string
+function countOccurrences(str, pattern) {
+  let count = 0, idx = 0;
+  while ((idx = str.indexOf(pattern, idx)) !== -1) { count++; idx++; }
+  return count;
+}
+
+// Check patch status
+const patchedMarker = 'isTranscriptMode:!0,verbose:!0,hideInTranscript:!1';
+const patchedCount = countOccurrences(dataStr, patchedMarker);
+
+// --verify mode: report patch status and exit
+if (isVerify) {
+  console.log('Patch status verification:\n');
+
+  // Settings
+  console.log('  Settings (prevents API from redacting thinking content):');
+  console.log(`    showThinkingSummaries: ${settingsResult === 'already_set' ? 'ENABLED' : 'NOT SET — add "showThinkingSummaries": true to ~/.claude/settings.json'}`);
+
+  // Display patch
+  const unpatchedWithNullCheck = countOccurrences(dataStr, 'case"thinking":{if(!');
+  console.log('\n  Display patch (forces thinking blocks visible in UI):');
+  console.log(`    Patched blocks: ${patchedCount}/2, Unpatched blocks: ${unpatchedWithNullCheck}`);
+  console.log(`    Status: ${patchedCount === 2 && unpatchedWithNullCheck === 0 ? 'APPLIED' : patchedCount === 0 ? 'NOT APPLIED' : 'PARTIAL'}`);
+
+  // Overall
+  const displayPatched = patchedCount === 2 && unpatchedWithNullCheck === 0;
+  const allGood = displayPatched && settingsResult === 'already_set';
+  console.log(`\n  Overall: ${allGood ? 'FULLY CONFIGURED' : 'NEEDS ATTENTION'}`);
+
+  if (!displayPatched) {
+    console.log('  Run "node patch-thinking.js" to apply the display patch.');
+  }
+
+  // Verify binary runs
+  try {
+    const versionOutput = execSync(`"${targetPath}" --version`, { encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    console.log(`\n  Binary executes: yes (${versionOutput})`);
+  } catch (e) {
+    console.log('\n  Binary executes: FAILED — binary may be corrupted');
+  }
+  process.exit(0);
+}
+
 // Check if already patched
-if (dataStr.includes('isTranscriptMode:!0,verbose:!0,hideInTranscript:!1')) {
-  console.log('Thinking visibility patch:');
-  console.log('  Already applied\n');
+if (patchedCount >= 2) {
+  console.log('Display patch already applied.\n');
   if (isDryRun) {
     console.log('DRY RUN - No changes needed\n');
   }
   process.exit(0);
 }
 
-// Find the thinking case block by locating the distinctive createElement with thinking props
-// Then walk backwards to find the start of the case block
-const marker = 'isTranscriptMode:';
+// Find the display patch pattern
+let originalPattern = null;
+let replacement = null;
+
 const createElementWithThinking = dataStr.indexOf(',isTranscriptMode:');
 if (createElementWithThinking === -1) {
-  console.error('Thinking visibility patch:');
+  console.error('Display patch:');
   console.error('  Pattern not found - could not locate thinking createElement');
   process.exit(1);
 }
 
 // Find all case"thinking":{ blocks and check which one contains the thinking createElement
 let searchStart = 0;
-let originalPattern = null;
 
 while (true) {
   const caseIdx = dataStr.indexOf('case"thinking":{if(!', searchStart);
   if (caseIdx === -1) break;
 
   // Extract until we find the closing pattern: return VAR}
-  // Walk forward to find the end - look for "return " followed by a short var and "}"
   let depth = 0;
   let endIdx = caseIdx + 16; // past case"thinking":
   for (let i = caseIdx + 16; i < caseIdx + 500; i++) {
@@ -209,58 +301,50 @@ while (true) {
 }
 
 if (!originalPattern) {
-  console.error('Thinking visibility patch:');
+  console.error('Display patch:');
   console.error('  Pattern not found - may need update for newer version');
   console.error('\nRun "claude --version" to check the installed version.');
   process.exit(1);
 }
 
-console.log('Thinking visibility patch:');
+console.log('Display patch:');
 console.log('  Pattern found - ready to apply');
-console.log(`  Pattern length: ${originalPattern.length} bytes\n`);
+console.log(`  Pattern length: ${originalPattern.length} bytes`);
 
 // Extract variable names from the pattern
-// Pattern: case"thinking":{if(!VAR1&&!VAR2)return null;let VAR3=VAR1&&...
 const nullCheckMatch = originalPattern.match(/if\(!(\w+)&&!(\w+)\)return null/);
 if (!nullCheckMatch) {
   console.error('Error: Could not parse null check variables');
   process.exit(1);
 }
-const var1 = nullCheckMatch[1]; // isTranscriptMode (e.g., P)
-const var2 = nullCheckMatch[2]; // verbose (e.g., H)
+const var1 = nullCheckMatch[1];
+const var2 = nullCheckMatch[2];
 
-// Extract hideInTranscript variable: let VAR3=...
 const hideVarMatch = originalPattern.match(/;let (\w+)=/);
 if (!hideVarMatch) {
   console.error('Error: Could not parse hideInTranscript variable');
   process.exit(1);
 }
-const var3 = hideVarMatch[1]; // hideInTranscript (e.g., G)
+const var3 = hideVarMatch[1];
 
 console.log(`  Variables: isTranscriptMode=${var1}, verbose=${var2}, hideInTranscript=${var3}`);
 
 // Build replacement - same byte length required for binary patching
-// Do all substitutions first (without padding), then pad the null check removal area
-let replacement = originalPattern;
+replacement = originalPattern;
 
-// 1. Remove null return check entirely (will pad this area later)
 const nullCheck = `if(!${var1}&&!${var2})return null;`;
 replacement = replacement.replace(nullCheck, '\x00PADDING_PLACEHOLDER\x00');
 
-// 2. Simplify hideInTranscript calc: "let G=P&&!(!j||Y===j),M" -> "let G=!1,M"
 const hideCalcRegex = new RegExp(`let ${var3}=.+?,(?=\\w+;if)`);
 const hideCalcMatch = replacement.match(hideCalcRegex);
 if (hideCalcMatch) {
-  const orig = hideCalcMatch[0];
-  replacement = replacement.replace(orig, `let ${var3}=!1,`);
+  replacement = replacement.replace(hideCalcMatch[0], `let ${var3}=!1,`);
 }
 
-// 3. Replace prop values in createElement (no padding - just direct substitution)
 replacement = replacement.replace(`isTranscriptMode:${var1}`, 'isTranscriptMode:!0');
 replacement = replacement.replace(`verbose:${var2}`, 'verbose:!0');
 replacement = replacement.replace(`hideInTranscript:${var3}`, 'hideInTranscript:!1');
 
-// 4. Replace cache comparisons and assignments
 function replaceVar(str, varName, literal) {
   const escaped = varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   str = str.replace(new RegExp(`!==${escaped}(?=[|)])`, 'g'), `!==${literal}`);
@@ -271,33 +355,32 @@ replacement = replaceVar(replacement, var1, '!0');
 replacement = replaceVar(replacement, var2, '!0');
 replacement = replaceVar(replacement, var3, '!1');
 
-// 5. Calculate how much padding we need and fill the placeholder
 const placeholderLen = '\x00PADDING_PLACEHOLDER\x00'.length;
 const currentLen = replacement.length;
 const targetLen = originalPattern.length;
-// The placeholder takes placeholderLen bytes; we need (targetLen - currentLen + placeholderLen) spaces
 const paddingNeeded = targetLen - currentLen + placeholderLen;
 
 if (paddingNeeded < 0) {
-  console.error(`Error: Replacement is ${-paddingNeeded} bytes too long even without padding.`);
-  console.error('This is a bug in the patcher. Please report it.');
+  console.error(`Error: Replacement is ${-paddingNeeded} bytes too long. Please report this bug.`);
   process.exit(1);
 }
 
 replacement = replacement.replace('\x00PADDING_PLACEHOLDER\x00', ' '.repeat(paddingNeeded));
 
-// Final verification
 if (replacement.length !== originalPattern.length) {
   console.error(`Error: Replacement length mismatch (${replacement.length} vs ${originalPattern.length})`);
-  console.error('This is a bug in the patcher. Please report it.');
   process.exit(1);
 }
 
+console.log();
+
 if (isDryRun) {
   console.log('DRY RUN - No changes will be made\n');
-  console.log('Would apply thinking visibility patch');
+  console.log('Would apply display patch (thinking block visibility)');
   console.log(`  Pattern: ${originalPattern.substring(0, 60)}...`);
-  console.log(`  Replace: ${replacement.substring(0, 60)}...`);
+  if (settingsResult === 'needs_update') {
+    console.log('Would enable showThinkingSummaries in settings');
+  }
   console.log('\nRun without --dry-run to apply.');
   process.exit(0);
 }
@@ -309,24 +392,34 @@ if (!fs.existsSync(backupPath)) {
   console.log(`Backup created: ${backupPath}\n`);
 }
 
-// Apply patch using Buffer for binary safety
-console.log('Applying patch...');
+const patched = Buffer.from(data);
+
+// Apply display patch — force thinking blocks visible
+console.log('Applying display patch...');
 const searchBuf = Buffer.from(originalPattern, 'utf8');
 const replaceBuf = Buffer.from(replacement, 'utf8');
 
-let patchCount = 0;
+let displayPatchCount = 0;
 let offset = 0;
-const patched = Buffer.from(data);
-
 while (true) {
   const idx = patched.indexOf(searchBuf, offset);
   if (idx === -1) break;
   replaceBuf.copy(patched, idx);
-  patchCount++;
+  displayPatchCount++;
   offset = idx + searchBuf.length;
 }
 
-console.log(`Applied to ${patchCount} location(s)\n`);
+if (displayPatchCount === 0) {
+  console.error('Error: Display pattern was found in text scan but not in binary search.');
+  process.exit(1);
+}
+console.log(`  Applied to ${displayPatchCount} location(s)`);
+
+if (displayPatchCount === 1) {
+  console.warn('  Warning: Expected 2 locations (binary contains 2 JS copies). Patch may be incomplete.');
+}
+
+console.log();
 
 // Write patched binary
 console.log('Writing patched binary...');
@@ -344,6 +437,33 @@ if (process.platform === 'darwin') {
   }
 }
 
-console.log('Patch applied! Please restart Claude Code for changes to take effect.');
-console.log('\nTo restore original behavior, run: node patch-thinking.js --restore');
+// Post-patch verification
+console.log('Verifying patch...');
+const verifyData = fs.readFileSync(targetPath);
+const verifyStr = verifyData.toString('utf8');
+
+const verifyDisplayCount = countOccurrences(verifyStr, patchedMarker);
+const remainingUnpatchedDisplay = countOccurrences(verifyStr, 'case"thinking":{if(!');
+
+if (verifyDisplayCount >= 2 && remainingUnpatchedDisplay === 0) {
+  console.log(`  Display patch: ${verifyDisplayCount} location(s) confirmed`);
+} else {
+  console.error(`  Display patch verification FAILED: ${verifyDisplayCount} patched, ${remainingUnpatchedDisplay} unpatched`);
+  console.error('  Restore from backup and try again.');
+  process.exit(1);
+}
+
+// Verify the binary still executes
+try {
+  const versionOutput = execSync(`"${targetPath}" --version`, { encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+  console.log(`  Binary execution: OK (${versionOutput})\n`);
+} catch (e) {
+  console.error('  Binary execution: FAILED');
+  console.error('  The binary may not run. Restore from backup: node patch-thinking.js --restore');
+  process.exit(1);
+}
+
+console.log('Patch applied and verified! Please restart Claude Code for changes to take effect.');
+console.log('\nTo verify later: node patch-thinking.js --verify');
+console.log('To restore original behavior: node patch-thinking.js --restore');
 process.exit(0);

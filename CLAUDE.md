@@ -58,9 +58,20 @@ Should show "Pattern found - ready to apply" with the detected variable names.
 
 ## Pattern Reference
 
-### Thinking Visibility Pattern
+### Part 1: Settings — Thinking Content (since v2.1.72)
 
-The banner function ("Thought for Xs") was removed in v2.0.75 — only the thinking case block patch is needed. The `verbose` prop is still present as of v2.1.69.
+Claude Code sends a `redact-thinking-2026-02-12` beta flag to the API by default. This causes the API to return thinking blocks with empty text and only cryptographic signatures. The condition for adding the beta:
+
+```
+if(hasThinking && modelSupportsIt && !printMode && settings.showThinkingSummaries !== true && featureFlag("tengu_quiet_hollow"))
+  betas.push("redact-thinking-2026-02-12");
+```
+
+Setting `showThinkingSummaries: true` in `~/.claude/settings.json` prevents the beta from being sent, allowing the API to return actual thinking content. This setting persists across Claude Code updates.
+
+### Part 2: Binary Patch — Thinking Display
+
+The banner function ("Thought for Xs") was removed in v2.0.75 — only the thinking case block patch is needed. The `verbose` prop is still present as of v2.1.72.
 
 The patch:
 - Removes `if(!<VAR1>&&!<VAR2>)return null;` (the null return check)

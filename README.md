@@ -4,7 +4,7 @@
 
 > Fork of [aleks-apostle/claude-code-patches](https://github.com/aleks-apostle/claude-code-patches).
 
-**Current Version:** Claude Code 2.1.69 (Updated 2026-03-05)
+**Current Version:** Claude Code 2.1.72 (Updated 2026-03-11)
 
 ## The Problem
 
@@ -25,18 +25,28 @@ This patch makes thinking blocks visible inline automatically:
   suggest extracting an interface first...
 ```
 
+**Note:** This is not the same as "verbose" mode. Claude always thinks — the thinking happens regardless of whether you can see it. This patch simply makes that existing thinking visible to you. It does not cause additional token usage or change Claude's behavior in any way.
+
 ## Quick Start
 
 ```bash
 cd claude-code-patches
 
-# Apply the patch (detects binary, patches, and re-signs)
+# Apply the patch (detects binary, configures settings, patches, and re-signs)
 node patch-thinking.js
 
 # Restart Claude Code
 ```
 
 ## How It Works
+
+The patch has two parts:
+
+### 1. Settings: Disable thinking redaction
+
+Claude Code sends a `redact-thinking` beta flag to the API by default, which causes the API to return thinking blocks with empty text (only cryptographic signatures). The patcher sets `showThinkingSummaries: true` in `~/.claude/settings.json`, which prevents this beta flag from being sent. This allows the API to return actual thinking content.
+
+### 2. Binary patch: Force thinking blocks visible
 
 The native Claude Code binary is a Bun-compiled Mach-O executable containing embedded JavaScript. The patcher:
 
@@ -51,23 +61,28 @@ The native Claude Code binary is a Bun-compiled Mach-O executable containing emb
 ```bash
 node patch-thinking.js              # Apply patch
 node patch-thinking.js --dry-run    # Preview without applying
+node patch-thinking.js --verify     # Check patch and settings status
 node patch-thinking.js --restore    # Restore from backup
 node patch-thinking.js --help       # Show help
 ```
 
 ## After Claude Code Updates
 
-When Claude Code auto-updates, the patch is overwritten. Re-apply:
+When Claude Code auto-updates, the binary patch is overwritten. Re-apply:
 
 ```bash
 node patch-thinking.js
 ```
+
+The `showThinkingSummaries` setting persists across updates — only the binary patch needs to be re-applied.
 
 ## Rollback
 
 ```bash
 node patch-thinking.js --restore
 ```
+
+To also remove the settings change, edit `~/.claude/settings.json` and remove `"showThinkingSummaries": true`.
 
 ## Version History
 
@@ -79,4 +94,4 @@ This project previously included a patch to configure which models subagents use
 
 ---
 
-**Last Updated:** 2026-03-05
+**Last Updated:** 2026-03-11
