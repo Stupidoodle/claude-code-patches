@@ -12,7 +12,7 @@ const isRestore = args.includes('--restore');
 const isVerify = args.includes('--verify');
 const showHelp = args.includes('--help') || args.includes('-h');
 
-const VERSION = '2.1.74';
+const VERSION = '2.1.109';
 
 if (showHelp) {
   console.log(`Claude Code Thinking Visibility Patcher v${VERSION}`);
@@ -312,7 +312,8 @@ console.log('  Pattern found - ready to apply');
 console.log(`  Pattern length: ${originalPattern.length} bytes`);
 
 // Extract variable names from the pattern
-const nullCheckMatch = originalPattern.match(/if\(!(\w+)&&!(\w+)\)return null/);
+// Allow $ in variable names (appears in v2.1.109+)
+const nullCheckMatch = originalPattern.match(/if\(!([\w$]+)&&!([\w$]+)\)return null/);
 if (!nullCheckMatch) {
   console.error('Error: Could not parse null check variables');
   process.exit(1);
@@ -320,7 +321,7 @@ if (!nullCheckMatch) {
 const var1 = nullCheckMatch[1];
 const var2 = nullCheckMatch[2];
 
-const hideVarMatch = originalPattern.match(/;let (\w+)=/);
+const hideVarMatch = originalPattern.match(/;let ([\w$]+)=/);
 if (!hideVarMatch) {
   console.error('Error: Could not parse hideInTranscript variable');
   process.exit(1);
